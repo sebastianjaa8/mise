@@ -1,0 +1,5 @@
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args: ['build', '-f', 'deploy/Dockerfile.gateway', '-t', 'gcr.io/$PROJECT_ID/mise-gateway', '.']
+images:
+  - 'gcr.io/$PROJECT_ID/mise-gateway'

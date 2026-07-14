@@ -9,10 +9,10 @@ PROJECT_ID="${1:?Usage: deploy.sh <gcp-project-id> [region]}"
 REGION="${2:-us-central1}"
 
 gcloud config set project "$PROJECT_ID"
-gcloud services enable run.googleapis.com cloudbuild.googleapis.com --project "$PROJECT_ID"
+gcloud services enable run.googleapis.com cloudbuild.googleapis.com artifactregistry.googleapis.com containerregistry.googleapis.com --project "$PROJECT_ID"
 
 echo "== candidate-service =="
-gcloud builds submit --tag "gcr.io/$PROJECT_ID/mise-candidate" -f deploy/Dockerfile.candidate . --project "$PROJECT_ID"
+gcloud builds submit --config deploy/cloudbuild-candidate.yaml . --project "$PROJECT_ID"
 gcloud run deploy mise-candidate \
   --image "gcr.io/$PROJECT_ID/mise-candidate" \
   --region "$REGION" --allow-unauthenticated \
@@ -20,7 +20,7 @@ gcloud run deploy mise-candidate \
   --project "$PROJECT_ID"
 
 echo "== ranking-service =="
-gcloud builds submit --tag "gcr.io/$PROJECT_ID/mise-ranking" -f deploy/Dockerfile.ranking . --project "$PROJECT_ID"
+gcloud builds submit --config deploy/cloudbuild-ranking.yaml . --project "$PROJECT_ID"
 gcloud run deploy mise-ranking \
   --image "gcr.io/$PROJECT_ID/mise-ranking" \
   --region "$REGION" --allow-unauthenticated \
@@ -31,7 +31,7 @@ CANDIDATE_URL=$(gcloud run services describe mise-candidate --region "$REGION" -
 RANKING_URL=$(gcloud run services describe mise-ranking --region "$REGION" --project "$PROJECT_ID" --format 'value(status.url)')
 
 echo "== gateway =="
-gcloud builds submit --tag "gcr.io/$PROJECT_ID/mise-gateway" -f deploy/Dockerfile.gateway . --project "$PROJECT_ID"
+gcloud builds submit --config deploy/cloudbuild-gateway.yaml . --project "$PROJECT_ID"
 gcloud run deploy mise-gateway \
   --image "gcr.io/$PROJECT_ID/mise-gateway" \
   --region "$REGION" --allow-unauthenticated \
