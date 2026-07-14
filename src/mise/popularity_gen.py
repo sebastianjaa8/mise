@@ -27,7 +27,7 @@ def make_recipe_popularity_history(recipes_df: pd.DataFrame, seed=RANDOM_SEED + 
             value = float(np.clip(value + trend + rng.normal(0, 0.015), 0.0, 1.0))
             rows.append(dict(
                 recipe_id=recipe.recipe_id,
-                event_timestamp=WEEK_START + pd.Timedelta(weeks=week),
+                event_timestamp=WEEK_START + pd.Timedelta(days=week * 7),
                 pop_bias=round(value, 4),
                 weekly_interactions=int(rng.poisson(5 + value * 40)),
             ))
