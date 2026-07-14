@@ -40,11 +40,20 @@ and reason about on a laptop, instead of importing a black-box library.
   with an offline file store for point-in-time-correct training joins and a
   materialized SQLite online store for request-time lookups. See "Why a
   feature store" below — it catches a real leak, not a hypothetical one.
+- **Split candidate-gen + ranking services** (`src/services/`): the
+  monolithic `mise.api` still exists as the simple reference
+  implementation, but `candidate_service` (retrieval) and `ranking_service`
+  (reranking) also run as two independent FastAPI apps, composed by a
+  `gateway` over real HTTP calls — each has its own cost profile (one FAISS
+  lookup vs. a GBDT pass per candidate) and can scale independently.
+- **Async catalog-refresh queue**: an admin endpoint enqueues an index
+  rebuild instead of doing it inline on the request thread; a separate
+  worker process claims and processes it from a durable SQLite-backed
+  queue, and a hot-reload endpoint swaps the new index in without
+  restarting the service.
 
 ## Not built yet (tracked, not hidden)
 
-- [ ] Candidate-gen / ranking split into separate services + async feature
-      recompute queue
 - [ ] AWS deploy (ECS Fargate) + load test (p99 latency under concurrent load)
 - [ ] Prometheus/Grafana serving metrics
 
@@ -103,13 +112,19 @@ system before it has a real production feedback loop. Current numbers:
 
 | Ranking source              | Recall@10 | Lift vs. popularity |
 |-------------------------------|-----------|----------------------|
-| Two-tower retrieval + ranker  | ~0.205    | 16x                   |
-| Two-tower retrieval alone     | ~0.087    | 7x                    |
+| Two-tower retrieval + ranker  | ~0.22     | ~17x                  |
+| Two-tower retrieval alone     | ~0.07-0.09| ~6-7x                 |
 | Popularity baseline            | ~0.013    | 1x                    |
-| Random                         | ~0.027    | 2x                    |
+| Random                         | ~0.02-0.03| ~2x                   |
+
+(numbers vary a little run to run — floating-point non-determinism in
+multi-threaded training ops means `python -m mise.train` isn't bit-for-bit
+reproducible even with a fixed seed; the relative story — ranker clearly
+beats retrieval alone, retrieval alone clearly beats popularity — holds
+across runs, which is what actually matters here)
 
 (popularity baseline = same top-10 recipes for every user, ignoring their
-profile entirely. The ranker's ~2.4x lift over retrieval-alone comes from
+profile entirely. The ranker's further lift over retrieval-alone comes from
 recovering true matches that landed in positions 11-50 by raw embedding
 similarity but get pulled back into the top-10 once explicit features like
 exact protein gap and equipment overlap are in play — the retrieval stage's
@@ -145,11 +160,44 @@ serving time is a real feature-store call, not a CSV read — the offline
 training join and the online serving lookup pull from the same source
 instead of two paths that can quietly drift apart.
 
+## Service split + async catalog refresh
+
+`src/services/candidate_service.py` and `src/services/ranking_service.py`
+are the same retrieval and reranking logic as `mise.api`, but as two
+independent FastAPI apps instead of one process — `src/services/gateway.py`
+is the only thing a client talks to, and it composes the other two over
+real HTTP:
+
+```bash
+uvicorn services.candidate_service:app --port 8001
+uvicorn services.ranking_service:app   --port 8002
+CANDIDATE_SERVICE_URL=http://localhost:8001 RANKING_SERVICE_URL=http://localhost:8002 \
+  uvicorn services.gateway:app --port 8000
+
+curl "http://localhost:8000/recommend?user_id=0&k=5"
+```
+
+Catalog refresh (new recipes added, embeddings need recomputing) shouldn't
+block a request thread, so it goes through a queue instead of running
+inline:
+
+```bash
+curl -X POST http://localhost:8001/admin/refresh-catalog   # returns a job_id immediately
+python -m mise.worker --once                                # a separate process claims + processes the job
+curl -X POST http://localhost:8001/admin/reload-index        # hot-swap the new index in, no restart
+```
+
+`mise.job_queue` is SQLite-backed rather than a real broker (SQS/Kafka/Redis
+Streams) — same durability property (survives a process restart, safe under
+polling) without a broker dependency for a single-node demo; swapping the
+backend later means replacing that one file, not any caller.
+
 ## Quickstart
 
 ```bash
 python -m venv .venv && source .venv/bin/activate  # or .venv\Scripts\activate on Windows
 pip install -r requirements-dev.txt
+pip install -e .               # installs `mise` + `services` so python -m / pytest work from anywhere
 
 python -m mise.data_gen        # writes data/recipes.csv, users.csv, interactions.csv
 python -m mise.train           # trains the two-tower model -> artifacts/model.pt + item_embeddings.npy
@@ -192,12 +240,20 @@ src/mise/
   evaluate.py       retrieval-only vs. retrieval+ranker vs. baselines
   popularity_gen.py time-varying recipe popularity + timestamped interactions for the feature store demo
   feature_store_demo.py  point-in-time-correct join vs. naive join, online store materialize + lookup
-  api.py            FastAPI serving layer
+  job_queue.py      SQLite-backed durable job queue
+  worker.py         polls the queue, processes catalog-refresh jobs
+  api.py            monolithic FastAPI serving layer (simple reference implementation)
+src/services/
+  candidate_service.py  retrieval-only FastAPI app (two-tower + FAISS)
+  ranking_service.py    reranking-only FastAPI app (LightGBM)
+  gateway.py            composes the two services over real HTTP
 feature_repo/
   feature_store.yaml  Feast project config (local provider, file offline store, sqlite online store)
   definitions.py      entities + feature views (recipe_popularity, user_profile)
   data/                generated parquet sources (gitignored, run popularity_gen.py to produce)
 tests/
-  test_pipeline.py  end-to-end: generate -> train -> index -> retrieve -> assert lift over popularity
-  test_ranking.py   end-to-end: retrieval + ranker -> assert ranker doesn't regress retrieval order
+  test_pipeline.py    end-to-end: generate -> train -> index -> retrieve -> assert lift over popularity
+  test_ranking.py     end-to-end: retrieval + ranker -> assert ranker doesn't regress retrieval order
+  test_services.py    candidate-gen and ranking services work standalone
+  test_job_queue.py   enqueue/claim/done/failed + dispatch mechanics
 ```
