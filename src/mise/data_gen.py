@@ -222,6 +222,9 @@ def make_interactions(users_df, recipes_df, candidates_per_user=40, seed=RANDOM_
 
 
 def generate_all(out_dir="data"):
+    import os
+    os.makedirs(out_dir, exist_ok=True)
+
     recipes = make_recipes()
     users = make_users()
     interactions = make_interactions(users, recipes)
