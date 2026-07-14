@@ -7,5 +7,8 @@ venv/
 data/*.csv
 artifacts/*
 !artifacts/.gitkeep
+feature_repo/data/*.parquet
+feature_repo/registry.db
+feature_repo/online_store.db
 implementation-notes.md
 .mise-notes/
