@@ -51,11 +51,20 @@ and reason about on a laptop, instead of importing a black-box library.
   worker process claims and processes it from a durable SQLite-backed
   queue, and a hot-reload endpoint swaps the new index in without
   restarting the service.
+- **Containerized + Cloud Run deploy config** (`deploy/`): one lean
+  Dockerfile per service (each installs only the dependencies that service
+  actually needs — the gateway image has no ML libraries in it at all) and
+  a `deploy.sh` that builds via Cloud Build and deploys all three to Cloud
+  Run (no local Docker required to ship this).
+- **Load test script + Prometheus `/metrics` on every service** — see "Load
+  test & monitoring" below for real numbers and what they show.
 
 ## Not built yet (tracked, not hidden)
 
-- [ ] AWS deploy (ECS Fargate) + load test (p99 latency under concurrent load)
-- [ ] Prometheus/Grafana serving metrics
+- [ ] Actual live Cloud Run deployment (script is written and the local
+      3-service stack is verified; blocked on `gcloud auth login`, which
+      needs an interactive browser login — not something a headless
+      process can do. See `deploy/deploy.sh`.)
 
 ## Architecture
 
@@ -192,6 +201,49 @@ Streams) — same durability property (survives a process restart, safe under
 polling) without a broker dependency for a single-node demo; swapping the
 backend later means replacing that one file, not any caller.
 
+## Deploying (Cloud Run)
+
+Three lean, per-service Dockerfiles (`deploy/Dockerfile.{candidate,ranking,gateway}`)
+plus matching per-service requirement lists — the gateway image, for
+example, has no torch/faiss/lightgbm in it at all, since all it ever does is
+proxy JSON between the other two:
+
+```bash
+deploy/deploy.sh <gcp-project-id> [region]   # builds via Cloud Build, deploys all 3 to Cloud Run
+```
+
+`gcloud run deploy` + `--source`/`--tag` builds server-side via Cloud Build,
+so this doesn't need Docker installed locally. Cloud Run's Always Free tier
+(2M requests/month, 360k vCPU-seconds) covers a demo workload at zero cost,
+and `--min-instances 0` means it scales to zero (and $0) between uses.
+
+## Load test & monitoring
+
+Every service exposes Prometheus-format metrics at `/metrics`
+(`prometheus-fastapi-instrumentator` — request count, latency histogram,
+and status code, per route). Cloud Run also auto-exports its own
+infra-level metrics (request count/latency/CPU/memory, per revision) to
+Cloud Monitoring for every deployed service with zero extra setup — between
+the two, that covers what a self-managed Prometheus + Grafana stack would,
+without running one.
+
+```bash
+python scripts/load_test.py http://localhost:8000 --requests 300 --concurrency 20
+```
+
+Local run against the full 3-service stack on this dev box: 300 requests,
+20 concurrent, 100% success, p50 838ms / p95 1983ms / p99 2416ms. Those
+numbers are dev-box artifacts, not a real capacity claim — a FAISS search
+over a 600-item index and a LightGBM predict over 50 rows are each
+sub-10ms operations in isolation, so multi-hundred-ms end-to-end latency
+here points at request/threadpool/networking overhead specific to this
+shared, multi-process Windows dev environment rather than the retrieval or
+ranking logic itself. The real, citable p50/p95/p99 numbers are the ones
+from `scripts/load_test.py` run against the actual deployed Cloud Run
+gateway URL once `deploy/deploy.sh` has run — noted here instead of
+papering over it, since "here's a number and here's why I don't trust it
+yet" is more useful than a fake-confident one.
+
 ## Quickstart
 
 ```bash
@@ -251,6 +303,12 @@ feature_repo/
   feature_store.yaml  Feast project config (local provider, file offline store, sqlite online store)
   definitions.py      entities + feature views (recipe_popularity, user_profile)
   data/                generated parquet sources (gitignored, run popularity_gen.py to produce)
+deploy/
+  Dockerfile.candidate/ranking/gateway  one lean image per service
+  requirements-candidate/ranking/gateway.txt  per-service dependency lists (no shared bloat)
+  deploy.sh            builds via Cloud Build, deploys all 3 to Cloud Run
+scripts/
+  load_test.py         concurrent request load test against a running gateway
 tests/
   test_pipeline.py    end-to-end: generate -> train -> index -> retrieve -> assert lift over popularity
   test_ranking.py     end-to-end: retrieval + ranker -> assert ranker doesn't regress retrieval order
