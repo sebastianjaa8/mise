@@ -1,0 +1,13 @@
+.git
+.venv
+venv
+__pycache__
+*.pyc
+*.egg-info
+.pytest_cache
+tests/
+implementation-notes.md
+.torch_cache
+feature_repo/registry.db
+feature_repo/online_store.db
+feature_repo/data/*.parquet

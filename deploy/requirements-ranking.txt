@@ -1,0 +1,6 @@
+lightgbm>=4.5
+pandas>=2.2
+fastapi>=0.115
+uvicorn[standard]>=0.30
+pydantic>=2.8
+prometheus-fastapi-instrumentator>=7.0
