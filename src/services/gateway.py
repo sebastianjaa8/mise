@@ -20,7 +20,10 @@ _client: httpx.AsyncClient | None = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _client
-    _client = httpx.AsyncClient(timeout=5.0)
+    # 15s: generous enough to cover a scaled-to-zero candidate-service cold
+    # start (torch + model load) rather than timing out on the exact
+    # slow-path this gateway exists to route around.
+    _client = httpx.AsyncClient(timeout=15.0)
     yield
     await _client.aclose()
 
@@ -31,26 +34,34 @@ Instrumentator().instrument(app).expose(app)  # GET /metrics — request count/l
 
 @app.get("/health")
 async def health():
-    async with httpx.AsyncClient(timeout=2.0) as client:
+    # Generous timeout + broad httpx.HTTPError (not just ConnectError) —
+    # a scaled-to-zero candidate-service cold start (loading torch + the
+    # model) can take several seconds, and a bare ConnectError catch missed
+    # that entirely: a slow-but-reachable downstream raised TimeoutException
+    # instead, which fell through to an unhandled 500.
+    async with httpx.AsyncClient(timeout=10.0) as client:
         try:
             candidate_health = (await client.get(f"{CANDIDATE_SERVICE_URL}/health")).json()
             ranking_health = (await client.get(f"{RANKING_SERVICE_URL}/health")).json()
-        except httpx.ConnectError as e:
+        except httpx.HTTPError as e:
             raise HTTPException(status_code=503, detail=f"downstream service unreachable: {e}")
     return {"status": "ok", "candidate_service": candidate_health, "ranking_service": ranking_health}
 
 
 @app.get("/recommend")
 async def recommend(user_id: int, k: int = 10, pool_size: int = 50):
-    candidate_resp = await _client.get(f"{CANDIDATE_SERVICE_URL}/candidates", params={"user_id": user_id, "k": pool_size})
-    if candidate_resp.status_code != 200:
-        raise HTTPException(status_code=candidate_resp.status_code, detail=candidate_resp.json().get("detail"))
-    candidates = candidate_resp.json()["candidates"]
+    try:
+        candidate_resp = await _client.get(f"{CANDIDATE_SERVICE_URL}/candidates", params={"user_id": user_id, "k": pool_size})
+        if candidate_resp.status_code != 200:
+            raise HTTPException(status_code=candidate_resp.status_code, detail=candidate_resp.json().get("detail"))
+        candidates = candidate_resp.json()["candidates"]
 
-    rerank_resp = await _client.post(
-        f"{RANKING_SERVICE_URL}/rerank",
-        json={"user_id": user_id, "candidates": candidates, "k": k},
-    )
-    if rerank_resp.status_code != 200:
-        raise HTTPException(status_code=rerank_resp.status_code, detail=rerank_resp.json().get("detail"))
+        rerank_resp = await _client.post(
+            f"{RANKING_SERVICE_URL}/rerank",
+            json={"user_id": user_id, "candidates": candidates, "k": k},
+        )
+        if rerank_resp.status_code != 200:
+            raise HTTPException(status_code=rerank_resp.status_code, detail=rerank_resp.json().get("detail"))
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=503, detail=f"downstream service unreachable: {e}")
     return rerank_resp.json()
