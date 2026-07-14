@@ -14,6 +14,7 @@ import numpy as np
 import pandas as pd
 import torch
 from fastapi import FastAPI, HTTPException
+from prometheus_fastapi_instrumentator import Instrumentator
 
 from mise.dataset import FeatureEncoder
 from mise.job_queue import JobQueue
@@ -41,6 +42,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="mise candidate-gen service", lifespan=lifespan)
+Instrumentator().instrument(app).expose(app)  # GET /metrics
 
 
 @app.get("/health")

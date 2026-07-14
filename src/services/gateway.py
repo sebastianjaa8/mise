@@ -9,6 +9,7 @@ from contextlib import asynccontextmanager
 
 import httpx
 from fastapi import FastAPI, HTTPException
+from prometheus_fastapi_instrumentator import Instrumentator
 
 CANDIDATE_SERVICE_URL = os.environ.get("CANDIDATE_SERVICE_URL", "http://localhost:8001")
 RANKING_SERVICE_URL = os.environ.get("RANKING_SERVICE_URL", "http://localhost:8002")
@@ -25,6 +26,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="mise gateway", lifespan=lifespan)
+Instrumentator().instrument(app).expose(app)  # GET /metrics — request count/latency/status by route
 
 
 @app.get("/health")

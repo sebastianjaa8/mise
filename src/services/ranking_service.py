@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 
 import pandas as pd
 from fastapi import FastAPI
+from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel
 
 from mise.rerank import Reranker
@@ -36,6 +37,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="mise ranking service", lifespan=lifespan)
+Instrumentator().instrument(app).expose(app)  # GET /metrics
 
 
 @app.get("/health")
