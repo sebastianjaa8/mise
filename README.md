@@ -35,10 +35,14 @@ and reason about on a laptop, instead of importing a black-box library.
 - **Offline eval harness** that checks retrieval quality against a
   simulator ground truth, not just the sparse logged interactions (see
   "Data & evaluation methodology" below for why).
+- **Feast feature store** (`feature_repo/`): recipe popularity is modeled as
+  a genuinely time-varying feature (8 weekly snapshots, not a static column),
+  with an offline file store for point-in-time-correct training joins and a
+  materialized SQLite online store for request-time lookups. See "Why a
+  feature store" below — it catches a real leak, not a hypothetical one.
 
 ## Not built yet (tracked, not hidden)
 
-- [ ] Feast feature store (offline/online split, point-in-time correctness)
 - [ ] Candidate-gen / ranking split into separate services + async feature
       recompute queue
 - [ ] AWS deploy (ECS Fargate) + load test (p99 latency under concurrent load)
@@ -113,6 +117,34 @@ job is "don't miss anything plausible," the ranker's job is "get the order
 right", and the two numbers here show each one earning its place in the
 pipeline)
 
+## Why a feature store
+
+Everywhere else in this repo, `pop_bias` is a static column. That's fine for
+the retrieval/ranking demo, but it's not how popularity actually behaves —
+recipes trend up and down week to week. `feature_repo/` fabricates 8 weekly
+popularity snapshots per recipe and timestamps the interaction log across
+that window, which makes a real mistake possible: joining *every* historical
+training row against *today's* popularity value instead of the value that
+recipe actually had at interaction time. That's future information leaking
+into the training set — a model trained on it looks great offline and
+underperforms in production, because at serving time the "future" value
+obviously isn't available yet.
+
+`feature_store_demo.py` builds both versions side by side — Feast's
+point-in-time-correct historical join, and a naive "current snapshot" join —
+on the same 500 sampled historical interactions:
+
+```
+point-in-time vs naive-latest-snapshot disagree on 319 rows (64.3%)
+```
+
+Almost two-thirds of sampled rows would have trained on a popularity value
+that didn't exist yet. The same `feature_repo/` also materializes those
+snapshots into a local SQLite online store, so a request-time lookup at
+serving time is a real feature-store call, not a CSV read — the offline
+training join and the online serving lookup pull from the same source
+instead of two paths that can quietly drift apart.
+
 ## Quickstart
 
 ```bash
@@ -128,7 +160,16 @@ python -m mise.evaluate        # retrieval-only vs. retrieval+ranker vs. popular
 uvicorn mise.api:app --reload  # http://localhost:8000/recommend?user_id=0
 ```
 
-Run the smoke test:
+Feature store demo (separate, since it's an illustrative offline/online-split
+capability rather than something wired into the live serving path yet):
+
+```bash
+python -m mise.popularity_gen               # writes feature_repo/data/*.parquet
+(cd feature_repo && feast apply)            # registers entities + feature views, creates the sqlite online store
+python -m mise.feature_store_demo           # point-in-time vs. naive-join comparison + online lookup
+```
+
+Run the smoke tests:
 
 ```bash
 pytest tests/
@@ -149,7 +190,13 @@ src/mise/
   rerank.py         query-time ranking-stage inference
   retrieve.py       query-time recommender (retrieval + rerank, known user + cold-start profile)
   evaluate.py       retrieval-only vs. retrieval+ranker vs. baselines
+  popularity_gen.py time-varying recipe popularity + timestamped interactions for the feature store demo
+  feature_store_demo.py  point-in-time-correct join vs. naive join, online store materialize + lookup
   api.py            FastAPI serving layer
+feature_repo/
+  feature_store.yaml  Feast project config (local provider, file offline store, sqlite online store)
+  definitions.py      entities + feature views (recipe_popularity, user_profile)
+  data/                generated parquet sources (gitignored, run popularity_gen.py to produce)
 tests/
   test_pipeline.py  end-to-end: generate -> train -> index -> retrieve -> assert lift over popularity
   test_ranking.py   end-to-end: retrieval + ranker -> assert ranker doesn't regress retrieval order
